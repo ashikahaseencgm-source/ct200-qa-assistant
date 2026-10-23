@@ -53,3 +53,5 @@ Desktop.ini
 /reports/phase1_inspection_summary.txt
 # Generated SQLite database (recreated by src/ingest_versions.py)
 ct200_qa.db
+# Generated NoSQL-style test case store
+data/test_cases_store.json
