@@ -1,0 +1,734 @@
+# CT-200 QA Assistant
+
+A backend API for ingesting, structuring, versioning, browsing, and generating QA test cases from the CardioTrack CT-200 Home Blood Pressure Monitor manual.
+
+The system processes two PDF versions of the manual (v1 and v2), reconstructs each document into a persisted hierarchical tree, and tracks logical sections across versions. It identifies new, changed, unchanged, and removed content, supports multi-section selections, generates AI-powered QA test case ideas using Google Gemini, and detects when previously generated test cases may be stale because the underlying document has changed.
+
+## Table of Contents
+
+- [Features](#features)
+- [Tech Stack](#tech-stack)
+- [Project Structure](#project-structure)
+- [Prerequisites](#prerequisites)
+- [Setup and Installation](#setup-and-installation)
+- [Database and Document Ingestion](#database-and-document-ingestion)
+- [Running the API](#running-the-api)
+- [API Reference](#api-reference)
+- [End-to-End Workflow](#end-to-end-workflow)
+- [PDF Extraction and Document Structure](#pdf-extraction-and-document-structure)
+- [Version Comparison Strategy](#version-comparison-strategy)
+- [Test Case Storage](#test-case-storage)
+- [Running Tests](#running-tests)
+- [Environment Variables](#environment-variables)
+- [Git Ignore Configuration](#git-ignore-configuration)
+- [Troubleshooting](#troubleshooting)
+- [Known Limitations](#known-limitations)
+- [Future Improvements](#future-improvements)
+- [Design Decisions](#design-decisions)
+- [License and Usage](#license-and-usage)
+
+## Features
+
+- **PDF ingestion:** Extracts headings, paragraphs, lists, and tables using PyMuPDF.
+- **Hierarchical document structure:** Reconstructs extracted content into a parent-child document tree.
+- **Content hashing:** Generates content hashes to help identify changes between document versions.
+- **Document versioning:** Stores multiple document versions and matches logical sections across versions.
+- **Change detection:** Identifies new, changed, and unchanged sections and reports removed sections.
+- **Document browsing:** Retrieves document metadata, versions, complete trees, and individual nodes.
+- **Search:** Searches headings and body text across document versions.
+- **Section selection:** Creates named selections containing one or more document nodes.
+- **AI-powered test case generation:** Uses Google Gemini to generate 3–5 QA test case ideas from selected content.
+- **Test case persistence:** Stores generated test cases in a local JSON file.
+- **Staleness detection:** Checks whether previously generated test cases may be outdated after document changes.
+- **Unified-diff-style comparison:** Shows added and removed content when comparing a node across versions.
+- **REST API documentation:** Provides interactive Swagger UI through FastAPI.
+- **Automated testing:** Uses pytest to validate tree construction, content hashing, table extraction, list extraction, and version comparison.
+
+## Tech Stack
+
+| Technology | Purpose |
+|---|---|
+| Python | Backend implementation |
+| FastAPI | REST API framework |
+| SQLite | Relational database |
+| SQLAlchemy | Database models and ORM |
+| PyMuPDF (`fitz`) | PDF parsing and content extraction |
+| Google Gemini (`google-genai`) | AI-powered test case generation |
+| JSON | Local persistence for generated test cases |
+| Pydantic | Request and response validation |
+| pytest | Automated testing |
+| Uvicorn | ASGI server |
+
+## Project Structure
+
+```text
+ct200-qa-assistant/
+├── data/
+│   ├── ct200_manual.pdf           # v1 source manual
+│   ├── ct200_manual_v2.pdf        # v2 source manual
+│   └── test_cases_store.json      # Generated at runtime; gitignored
+├── src/
+│   ├── pdf_extractor.py           # Extracts structured PDF content
+│   ├── document_tree.py           # Content hashing and hierarchy helpers
+│   ├── tree_builder.py            # Builds the hierarchical document tree
+│   ├── versioning.py              # Matches nodes across versions
+│   ├── ingest_versions.py         # Ingests both PDF versions
+│   ├── database.py                # SQLAlchemy engine and sessions
+│   ├── models.py                  # Database models
+│   ├── schemas.py                 # Pydantic schemas
+│   ├── llm_client.py              # Gemini client and prompt handling
+│   ├── nosql_store.py             # JSON-based test case storage
+│   └── main.py                    # FastAPI application and endpoints
+├── tests/
+│   ├── test_tree_structure.py      # Tree structure tests
+│   ├── test_content_hashing.py     # Content hashing tests
+│   ├── test_tables.py              # Table extraction tests
+│   ├── test_lists.py               # List extraction tests
+│   └── test_version_differences.py # Version comparison tests
+├── .env                            # Local secrets; gitignored
+├── .gitignore
+├── requirements.txt
+├── README.md
+└── ct200_qa.db                     # Generated by ingestion; gitignored
+```
+
+The SQLite database and JSON test case store are runtime-generated files. They are created or updated during execution and should not be committed to Git unless there is a specific reason to include generated data.
+
+## Prerequisites
+
+Before setting up the project, ensure that you have:
+
+- Python installed and accessible from PowerShell.
+- Git installed.
+- VS Code or another Python-compatible editor.
+- Both source PDF manuals.
+- A Google Gemini API key for test case generation.
+
+## Setup and Installation
+
+### 1. Clone the Repository
+
+Open PowerShell and run:
+
+```powershell
+git clone https://github.com/ashikahaseencgm-source/ct200-qa-assistant.git
+cd ct200-qa-assistant
+```
+
+### 2. Create and Activate a Virtual Environment
+
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+```
+
+If PowerShell does not recognize `python`, verify your Python installation or use the full path to your Python executable.
+
+If PowerShell blocks activation, use an appropriate session-level execution policy adjustment or activate the environment through Command Prompt.
+
+### 3. Install Dependencies
+
+With the virtual environment activated, run:
+
+```powershell
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+### 4. Configure Environment Variables
+
+Create a `.env` file in the project root:
+
+```env
+GEMINI_API_KEY=your_gemini_api_key_here
+```
+
+Replace the placeholder with your actual Gemini API key.
+
+The key is required for the test case generation endpoint:
+
+`POST /selections/{selection_id}/test-cases`
+
+The other endpoints are designed to work without a Gemini API key.
+
+**Security:** Never commit `.env` or expose your API key in source code, screenshots, logs, or public repositories.
+
+### 5. Verify the Source PDFs
+
+Ensure both files exist in the `data/` directory:
+
+```text
+data/ct200_manual.pdf
+data/ct200_manual_v2.pdf
+```
+
+The files represent the original v1 and updated v2 manuals, respectively.
+
+## Database and Document Ingestion
+
+The project uses SQLite with SQLAlchemy to persist document metadata, document versions, hierarchical nodes, and selections.
+
+The ingestion script builds the document trees and establishes the version comparison data used by the API.
+
+### Run Ingestion
+
+From the project root, execute:
+
+```powershell
+python src/ingest_versions.py
+```
+
+The script:
+
+1. Deletes and recreates `ct200_qa.db`.
+2. Parses `ct200_manual.pdf` and builds its hierarchical document tree.
+3. Stores the first manual as version 1.
+4. Parses `ct200_manual_v2.pdf` and builds its hierarchical document tree.
+5. Matches logical sections in v2 against corresponding sections in v1.
+6. Identifies new, changed, and unchanged nodes.
+7. Reports sections present in v1 but absent from v2 as removed.
+8. Prints a version comparison report.
+
+### Example Version Comparison Report
+
+The output should have a structure similar to the following:
+
+```text
+--- Version comparison report ---
+
+New in V2 (1):
+  - 5.3 5.3 Data Export
+
+Changed in V2 (4):
+  - 2.1.1.1 2.1.1.1 Battery Life Under Typical Use
+  - 3.2 3.2 Cuff Inflation Sequence
+  - 4.2 4.2 Error Codes
+  - 4.3 4.3 Alarm Thresholds
+
+Unchanged: 24
+
+Removed from V1 (0):
+```
+
+These values are illustrative. Verify the actual report produced by `ingest_versions.py` before submission.
+
+### Re-ingestion Behavior
+
+Every run of `ingest_versions.py` rebuilds the database from both PDFs. It is not an incremental migration mechanism, and existing database-backed selections may be lost.
+
+Back up any required data before rerunning ingestion. See [Known Limitations](#known-limitations) for details.
+
+## Running the API
+
+After successful ingestion, start the FastAPI server from the project root:
+
+```powershell
+uvicorn main:app --reload --app-dir src
+```
+
+The API will be available at:
+
+- **Base URL:** http://127.0.0.1:8000
+- **Swagger UI:** http://127.0.0.1:8000/docs
+- **ReDoc:** http://127.0.0.1:8000/redoc
+
+The API creates the required database tables on startup but does not automatically ingest the PDFs or rebuild the database.
+
+Run the ingestion script at least once before using the API. Keep the server running while testing endpoints, and use a separate PowerShell terminal for requests.
+
+## API Reference
+
+### 1. Document Browsing
+
+| Method | Endpoint | Description |
+|---|---|---|
+| GET | `/documents` | Lists available documents. |
+| GET | `/documents/{document_id}/versions` | Lists versions of a document. |
+| GET | `/versions/{version_id}/tree` | Retrieves the complete hierarchical tree for a version. |
+| GET | `/nodes/{node_id}` | Retrieves a node's heading, text, tables, and content hash. |
+| GET | `/nodes/{node_id}/diff` | Compares a node against its matched node in another version and returns a unified-diff-style text comparison. |
+| GET | `/search?q=...&version_id=...` | Searches node headings and body text, optionally filtering by version. |
+
+#### Example: Node Version Diff
+
+Request:
+
+```http
+GET /nodes/11/diff
+```
+
+Example response:
+
+```json
+{
+  "node_id": 11,
+  "heading": "3.2 Cuff Inflation Sequence",
+  "version_number": 1,
+  "has_changed": true,
+  "detail": "Changed in version 2.",
+  "diff": "--- \n+++ \n@@ -2,4 +2,6 @@\n of 180 mmHg...\n-device inflates in 40 mmHg increments...\n+device inflates in 30 mmHg increments..."
+}
+```
+
+The `has_changed` field indicates whether the compared content differs. The `diff` field contains a unified-diff-style text comparison:
+
+- Lines prefixed with `-` represent removed content.
+- Lines prefixed with `+` represent added content.
+- Lines beginning with a space represent unchanged context.
+
+The example illustrates the response format. Actual values depend on the node and document versions being compared.
+
+### 2. Section Selection
+
+| Method | Endpoint | Description |
+|---|---|---|
+| POST | `/selections` | Creates a named selection containing one or more document nodes. |
+| GET | `/selections/{selection_id}` | Retrieves selection details. |
+
+A selection is intended to be associated with the chosen document version so that the content used for test case generation can be traced to its source.
+
+#### Example: Create a Selection
+
+Request body:
+
+```json
+{
+  "name": "3.3 Classification Test",
+  "node_ids": [13]
+}
+```
+
+Send the body to:
+
+```http
+POST /selections
+Content-Type: application/json
+```
+
+The example assumes node ID `13` exists and refers to the intended section. Retrieve actual node IDs from the version tree before creating a selection.
+
+### 3. AI Test Case Generation
+
+| Method | Endpoint | Description |
+|---|---|---|
+| POST | `/selections/{selection_id}/test-cases` | Generates 3–5 QA test case ideas from selected content using Gemini. |
+| GET | `/selections/{selection_id}/test-cases` | Retrieves previously generated test cases. |
+
+The generation workflow reconstructs the selected section's content and sends it to Gemini through the configured LLM client.
+
+Generated test cases are stored in `data/test_cases_store.json`, keyed by selection ID.
+
+The generation endpoint requires a valid Gemini API key and working API access.
+
+#### Example: Generate Test Cases
+
+Request:
+
+```http
+POST /selections/1/test-cases
+```
+
+Example response:
+
+```json
+{
+  "selection_id": 1,
+  "test_cases": [
+    {
+      "title": "Verify Normal Blood Pressure Classification Display",
+      "preconditions": "The CardioTrack CT-200 is powered on, ready to measure, and connected to a test simulator or subject.",
+      "steps": [
+        "Perform a complete blood pressure measurement configured to return systolic pressure below 120 ...",
+        "Check the device display screen immediately after measurement completion."
+      ],
+      "expected_result": "The device simultaneously displays systolic pressure, diastolic pressure, and pulse rate, and the classification indicator indicates 'Normal'.",
+      "priority": "high"
+    }
+  ]
+}
+```
+
+The response contains the selection ID and a collection of generated test cases. Each test case includes:
+
+- `title` — A concise description of the test.
+- `preconditions` — The required initial conditions.
+- `steps` — The actions to perform.
+- `expected_result` — The behavior expected from the device.
+- `priority` — The assigned test priority.
+
+The example illustrates the response structure. The first test step is abbreviated; actual generated content depends on the selected sections and Gemini response. Generated test cases should be reviewed against the source manual before being used in formal QA procedures.
+
+### 4. Staleness Detection
+
+| Method | Endpoint | Description |
+|---|---|---|
+| GET | `/selections/{selection_id}/staleness` | Checks whether previously generated test cases may be outdated relative to the selected document content. |
+
+Staleness detection uses the selected nodes and their stored content information to determine whether the generated test cases still reflect the relevant document content.
+
+#### Example: Check Test Case Staleness
+
+Request:
+
+```http
+GET /selections/1/staleness
+```
+
+Example response:
+
+```json
+{
+  "selection_id": 1,
+  "is_stale": false,
+  "reason": "All sections in this selection are unchanged in the latest document version.",
+  "current_version_numbers": [1],
+  "latest_version_number": 2,
+  "node_details": [
+    {
+      "node_id": 13,
+      "heading": "3.3 Result Display and Classification",
+      "status": "unchanged",
+      "detail": "Content unchanged in latest version."
+    }
+  ]
+}
+```
+
+The response provides:
+
+- `selection_id` — The selection being checked.
+- `is_stale` — Indicates whether the selected content is considered outdated.
+- `reason` — A human-readable explanation of the result.
+- `current_version_numbers` — The version numbers associated with the selected content.
+- `latest_version_number` — The latest available document version.
+- `node_details` — Per-node information, including the heading, comparison status, and explanatory detail.
+
+In this example, the selection is not stale because its selected section remains unchanged in the latest version.
+
+Actual values and status wording depend on the implementation and the versions being compared.
+
+## End-to-End Workflow
+
+The following example demonstrates the intended workflow from ingestion to retrieval.
+
+### Step 1: Ingest Both Manuals
+
+```powershell
+python src/ingest_versions.py
+```
+
+### Step 2: Start the API
+
+Run in a separate terminal:
+
+```powershell
+uvicorn main:app --reload --app-dir src
+```
+
+### Step 3: Inspect the API
+
+Open:
+
+http://127.0.0.1:8000/docs
+
+Use the endpoints to inspect documents, versions, and node trees.
+
+### Step 4: Create a Selection
+
+```powershell
+Invoke-RestMethod -Method Post `
+  -Uri "http://127.0.0.1:8000/selections" `
+  -ContentType "application/json" `
+  -Body '{"name":"3.3 Classification Test","node_ids":[13]}'
+```
+
+Replace `13` with the actual node ID. Record the `selection_id` returned by the API.
+
+### Step 5: Generate Test Cases
+
+Replace `1` with the returned selection ID:
+
+```powershell
+Invoke-RestMethod -Method Post `
+  -Uri "http://127.0.0.1:8000/selections/1/test-cases"
+```
+
+This endpoint requires the Gemini API key.
+
+### Step 6: Retrieve Test Cases
+
+```powershell
+Invoke-RestMethod `
+  -Uri "http://127.0.0.1:8000/selections/1/test-cases"
+```
+
+### Step 7: Check Staleness
+
+```powershell
+Invoke-RestMethod `
+  -Uri "http://127.0.0.1:8000/selections/1/staleness"
+```
+
+### Step 8: Search the Manuals
+
+Search for content containing `cuff`:
+
+```powershell
+Invoke-RestMethod `
+  -Uri "http://127.0.0.1:8000/search?q=cuff"
+```
+
+To restrict the search to a particular version:
+
+```powershell
+Invoke-RestMethod `
+  -Uri "http://127.0.0.1:8000/search?q=cuff&version_id=2"
+```
+
+Use a valid version ID returned by the API.
+
+### Step 9: Compare a Node Across Versions
+
+```powershell
+Invoke-RestMethod `
+  -Uri "http://127.0.0.1:8000/nodes/11/diff"
+```
+
+Replace `11` with the node ID you want to investigate.
+
+## PDF Extraction and Document Structure
+
+The PDF extraction pipeline converts each source manual into structured blocks before reconstructing the document hierarchy.
+
+The pipeline is designed to preserve:
+
+- Page-level source information.
+- Section headings and numbering.
+- Paragraph text.
+- Numbered and bulleted lists.
+- Tables, including their rows and columns.
+- Parent-child relationships between sections.
+- Node identifiers and content hashes.
+
+Preserving structure is important because generated QA test cases should be based on the correct section, table, or requirement rather than an unstructured collection of extracted text.
+
+### Table Extraction
+
+The project includes tests targeting tables in the CT-200 manuals, including:
+
+- Section 2.1 — General Specifications.
+- Section 4.2 — Error Codes.
+
+A known discrepancy exists in the Error Codes table:
+
+- **V1:** Contains error codes E1–E5, with E3 timing listed as 2 seconds.
+- **V2:** Contains error codes E1–E6, with E3 timing listed as 1.5 seconds.
+
+The updated table should be preserved accurately so version comparison can identify the timing change and newly introduced error code.
+
+The extraction process must distinguish actual table content from unrelated text blocks and formatting artifacts.
+
+### List Extraction
+
+The project includes tests for the numbered blood pressure classification list in Section 3.3. These tests help verify that list items remain correctly ordered and associated with their source section.
+
+## Version Comparison Strategy
+
+The versioning component matches nodes from v2 against nodes from v1 using the implemented matching strategy and compares their content hashes.
+
+The system classifies matched nodes as unchanged or changed, identifies newly introduced content, and reports sections from v1 that are absent in v2 as removed.
+
+The comparison supports:
+
+- Tracking changes between manual revisions.
+- Identifying sections requiring renewed QA coverage.
+- Detecting changes to technical specifications and error codes.
+- Maintaining traceability between generated test cases and their source content.
+
+The node diff endpoint provides a unified-diff-style comparison for investigating changes to individual nodes.
+
+The matching strategy has known limitations when section identifiers and headings change simultaneously. See [Known Limitations](#known-limitations).
+
+## Test Case Storage
+
+Generated test cases are stored in:
+
+```text
+data/test_cases_store.json
+```
+
+The JSON file acts as a lightweight local store keyed by selection ID. SQLite remains responsible for relational data, including documents, versions, nodes, and selections.
+
+### Why JSON Instead of MongoDB?
+
+For this assignment's scale, a local JSON file avoids the additional setup and operational requirements of a running MongoDB instance.
+
+This is an assignment-specific design choice rather than a recommendation for every production application. The concurrency, transaction, and integrity trade-offs are documented under [Known Limitations](#known-limitations).
+
+## Running Tests
+
+The project uses pytest for automated testing.
+
+Run the test suite from the project root with the virtual environment activated:
+
+```powershell
+pytest
+```
+
+The documented test suite contains 46 unit tests covering the implemented document-processing and versioning functionality. Confirm the current count using the actual pytest output before submission.
+
+### Test Coverage
+
+| Test File | Purpose |
+|---|---|
+| `test_tree_structure.py` | Validates hierarchical tree construction and parent-child relationships. |
+| `test_content_hashing.py` | Tests content hashing, including duplicate-heading disambiguation. |
+| `test_tables.py` | Tests table extraction from relevant CT-200 manual sections. |
+| `test_lists.py` | Tests numbered list extraction, including Section 3.3. |
+| `test_version_differences.py` | Tests version comparison, including Section 5.3 and page-boundary shifts between v1 and v2. |
+
+These tests focus on structural irregularities found in the source manuals rather than relying exclusively on synthetic documents.
+
+A successful test run should complete without failures. If a test fails, inspect the assertion and extracted source content before changing the parser. A discrepancy may reflect a genuine difference between the manuals rather than an extraction defect.
+
+## Environment Variables
+
+| Variable | Required | Purpose |
+|---|---|---|
+| `GEMINI_API_KEY` | Only for test case generation | Authenticates requests to the Google Gemini API. |
+
+Keep credentials in `.env` and ensure that the file is excluded from version control.
+
+## Git Ignore Configuration
+
+Add the following entries to `.gitignore` to exclude local configuration, generated data, and Python environment files:
+
+```gitignore
+# Environment variables and secrets
+.env
+.env.*
+
+# Python virtual environment
+.venv/
+venv/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Generated test case data
+data/test_cases_store.json
+
+# IDE settings
+.vscode/
+
+# Operating system files
+.DS_Store
+Thumbs.db
+```
+
+The source PDFs should remain available in the expected `data/` paths for the documented ingestion workflow.
+
+Review the ignore rules before committing if you intentionally need to share a database snapshot or other generated artifact.
+
+## Troubleshooting
+
+### Python Is Not Recognized
+
+Verify your Python installation and PATH configuration. You can also invoke Python using the full path to the executable.
+
+### Virtual Environment Activation Fails
+
+If PowerShell blocks activation, use an appropriate session-level execution policy adjustment or activate the environment through Command Prompt.
+
+### Gemini Test Case Generation Fails
+
+Verify that:
+
+1. `.env` exists in the project root.
+2. `GEMINI_API_KEY` contains a valid key.
+3. The `google-genai` dependency is installed.
+4. The configured Gemini model is available to your API key.
+5. The machine has network access to the Gemini API.
+
+Check the actual API response and server logs for the cause of the failure.
+
+### Test Cases Are Missing
+
+Check that the generation request completed successfully and that `data/test_cases_store.json` was created or updated. Verify that you are using the correct selection ID.
+
+### Node IDs Do Not Match
+
+Node IDs can change when the database is rebuilt. Retrieve current IDs from the version tree rather than relying on values from an earlier ingestion run.
+
+## Known Limitations
+
+The current implementation is designed for an assignment-scale demonstration using two document versions.
+
+### 1. Version-Matching Limitations
+
+If a section is renumbered and reworded in the same revision, the matching strategy may classify it as one removed node and one new node rather than recognizing it as a changed logical section.
+
+### 2. Unicode Ligature Normalization
+
+Unicode ligature characters, such as `ﬀ`, `ﬁ`, and `ﬂ`, are normalized at the search layer but are not yet normalized consistently at the content-hashing layer. Visually equivalent text may therefore produce different content hashes.
+
+### 3. Cross-Version Selection Validation
+
+The current implementation does not validate that all node IDs supplied in a selection belong to the same document version. This can result in ambiguous or inconsistent behavior when nodes from different versions are combined.
+
+### 4. Full Database Rebuild
+
+The ingestion script recreates the database from both PDFs on every run rather than performing incremental ingestion. This simplifies the two-version demonstration but does not preserve existing database-backed selections across rebuilds.
+
+### 5. JSON Store Constraints
+
+The JSON-based test case store is suitable for a small local demonstration but does not provide the concurrency control, transactional guarantees, indexing, or multi-user access patterns of a dedicated database.
+
+### 6. PDF Extraction Variability
+
+PDFs do not always contain semantic document structure. Table boundaries, reading order, heading styles, page breaks, and multi-column layouts can complicate extraction. Extracted content should be validated against the source manual, particularly for safety-relevant technical specifications.
+
+### 7. AI-Generated Test Case Validation
+
+AI-generated test cases are suggestions that require review against the source manual and intended product requirements. They should not be treated as verified clinical or device-safety test procedures without appropriate expert validation.
+
+## Future Improvements
+
+Potential enhancements include:
+
+- Incremental ingestion that preserves historical selections and generated test cases.
+- Stronger cross-version node matching for renamed or renumbered sections.
+- Consistent Unicode normalization before hashing and searching.
+- Validation that every node in a selection belongs to the intended document version.
+- More robust extraction of complex tables and multi-column layouts.
+- A dedicated database for generated test cases if the application grows.
+- Improved structured validation of LLM responses.
+- Explicit source-page and section references in generated test cases.
+- Better tracking of test case provenance and regeneration history.
+- Expanded integration tests for API endpoints and staleness detection.
+
+## Design Decisions
+
+The implementation makes several deliberate trade-offs for the assignment:
+
+- **SQLite for relational data:** Keeps document, version, node, and selection storage simple to run locally.
+- **JSON for generated test cases:** Avoids a separate database service for a small set of generated records.
+- **Full rebuild for ingestion:** Simplifies reproducibility for a demonstration involving two fixed manual versions.
+- **Content hashing and structural matching:** Provides a practical approach to detecting changes while acknowledging matching limitations.
+- **Separate Gemini client:** Keeps AI prompts, configuration, and response handling separate from the API routes.
+
+These choices prioritize a reproducible local workflow while making the limitations of the current design explicit.
+
+## License and Usage
+
+No license is granted. This project is provided for academic evaluation purposes only.
+
+The CT-200 manual PDFs are source materials used to demonstrate PDF extraction, hierarchical document modeling, version comparison, and AI-assisted QA test case generation. Any redistribution or reuse of those manuals must comply with the applicable rights and permissions.
+
