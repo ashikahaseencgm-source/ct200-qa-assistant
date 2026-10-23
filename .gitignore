@@ -51,3 +51,5 @@ Desktop.ini
 /reports/ct200_manual_extracted_text.txt
 /reports/ct200_manual_v2_extracted_text.txt
 /reports/phase1_inspection_summary.txt
+# Generated SQLite database (recreated by src/ingest_versions.py)
+ct200_qa.db
