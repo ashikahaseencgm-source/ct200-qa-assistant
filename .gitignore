@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Python tooling and test artifacts
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+*.egg-info/
+
+# Build outputs
+build/
+dist/
+
+# Local IDE and editor settings
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Temporary files and logs
+*.log
+*.tmp
+*.temp
+*.bak
+*~
+
+# OS-generated files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Generated PDF extraction reports (see scripts/README_PHASE1.md)
+/reports/ct200_manual_extracted_text.txt
+/reports/ct200_manual_v2_extracted_text.txt
+/reports/phase1_inspection_summary.txt
