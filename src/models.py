@@ -68,9 +68,24 @@ class Node(Base):
     change_status = Column(String, nullable=False, default="new")
 
 
+# class Selection(Base):
+#     __tablename__ = "selections"
+
+#     id = Column(Integer, primary_key=True)
+#     node_id = Column(Integer, ForeignKey("nodes.id"), nullable=False)
+#     created_at = Column(DateTime, default=datetime.utcnow)
+
 class Selection(Base):
     __tablename__ = "selections"
 
     id = Column(Integer, primary_key=True)
-    node_id = Column(Integer, ForeignKey("nodes.id"), nullable=False)
+    name = Column(String, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class SelectionNode(Base):
+    __tablename__ = "selection_nodes"
+
+    id = Column(Integer, primary_key=True)
+    selection_id = Column(Integer, ForeignKey("selections.id"), nullable=False)
+    node_id = Column(Integer, ForeignKey("nodes.id"), nullable=False)
